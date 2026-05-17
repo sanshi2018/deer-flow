@@ -1,309 +1,354 @@
-# 00 · 学习路线总览（DeerFlow 全栈 Agent 系统）
+# 00 · 学习路线总览 —— bytedance/deer-flow 面试导向精读（v3）
 
-> 教练定位：这份文档不是给"读 README 就够了"的人看的。它写给已经能跑通 LangGraph + Pydantic Hello World、但还没真正读过一个**生产级多智能体系统**的工程师。
->
-> 目标：把 `bytedance/deer-flow` 这个 ~5 万行（仅 backend Python ≈ 30k+ 行）的工程，按模块切片、按依赖顺序拆成 **22 份**自洽的 Markdown，让你既能"通"也能"深"。
->
-> 风格：所有论断都带源码路径 + 行号锚点；没有源码佐证的部分一律标注"待后续确认"。
+> 本目录是为「**高级 Agent 开发工程师** 面试准备」量身设计的源码精读路线。
+> 节奏：**一次只产出一份 md，本份是路线总览，请确认目录与依赖关系后再进入下一份。**
 
----
+**v3 调整**（在 v2 基础上）：
+- ✅ 新增 **`05 配置体系：AppConfig + ExtensionsConfig + 反射装配`**，覆盖 26 份子配置组合、`$ENV_VAR` 解析、mtime 缓存失效、`resolve_variable` 反射加载工具/沙箱/Provider 的全套机制。这是后面所有"插件化"章节的前置。
+- ✅ 原 `15 Tools & MCP` 拆为两份独立 md：`16 Tools 系统`（内建+community+四源合并+`@tool`/`BaseTool` 协议）+ `17 MCP 集成`（多服务器+OAuth+lazy cache+Tool Search 协作）。
+- ✅ 02 LangChain 章节走 **C 方案**：源码逐行解 `create_agent` + 对比 `create_react_agent` + DeerFlow 中间件 walkthrough，篇幅会显著加长。
 
-## 1. 仓库结构地图（实际扫描结果）
-
-下面这棵树是我刚刚通过 `find` 在你本地 `/Users/sanshi/PycharmProjects/deer-flow/` 上跑出来的（剔除了 `.git / .venv / node_modules / __pycache__ / dist`），不是 README 的宣传图。
-
-```
-deer-flow/
-├── Makefile                         # 根目录 make 入口（dev / start / docker-* / up / down）
-├── config.example.yaml              # 主配置模板（44KB）
-├── extensions_config.example.json   # MCP + Skills 启用状态
-├── docker/
-│   ├── docker-compose.yaml          # 生产
-│   ├── docker-compose-dev.yaml      # 开发
-│   ├── dev-entrypoint.sh
-│   ├── nginx/{nginx.conf, nginx.local.conf}
-│   └── provisioner/{Dockerfile, app.py, README.md}   # K8s 沙箱供给器
-├── scripts/                         # 顶层运维脚本（setup_wizard, doctor, check, configure, deploy, docker, serve）
-├── skills/public/<22 个内置 skill>   # 公开 skills（agent 系统提示中可见的能力清单）
-├── frontend/                        # Next.js 前端（src/{app,components,core,...}）
-│   └── src/core/{agents,api,artifacts,auth,mcp,memory,messages,models,
-│                 settings,skills,streamdown,tasks,threads,todos,tools,uploads,...}
-└── backend/                         # 本次学习重点
-    ├── Makefile                     # 后端 make（dev / gateway / test / lint）
-    ├── langgraph.json               # LangGraph Studio 入口（graphs/auth/checkpointer 三处装配点）
-    ├── pyproject.toml
-    ├── debug.py                     # 调试脚本入口
-    ├── packages/harness/
-    │   ├── pyproject.toml           # 独立可发布包 deerflow-harness
-    │   └── deerflow/                # **import 前缀: deerflow.*；不依赖 app.***
-    │       ├── __init__.py
-    │       ├── client.py            # 1278 行：DeerFlowClient 内嵌 SDK
-    │       ├── agents/
-    │       │   ├── __init__.py             # 触发 skills 预热
-    │       │   ├── factory.py              # create_deerflow_agent（纯参数工厂）
-    │       │   ├── features.py             # RuntimeFeatures + @Next/@Prev 注解
-    │       │   ├── thread_state.py         # ThreadState/SandboxState 状态 schema
-    │       │   ├── lead_agent/{agent.py, prompt.py}   # 主智能体 + 823 行系统提示
-    │       │   ├── memory/{queue, updater, storage, prompt, message_processing, summarization_hook}
-    │       │   └── middlewares/<18 个 .py>  # 见 §3 中间件矩阵
-    │       ├── sandbox/
-    │       │   ├── sandbox.py / sandbox_provider.py     # 抽象接口
-    │       │   ├── tools.py                              # 1583 行：bash/read/write/str_replace/ls/glob/grep + 虚拟路径系统
-    │       │   ├── middleware.py / security.py / search.py / exceptions.py
-    │       │   └── local/{local_sandbox.py, local_sandbox_provider.py}
-    │       ├── community/aio_sandbox/  # Docker/K8s 沙箱（aio_sandbox_provider 707 行）
-    │       ├── subagents/
-    │       │   ├── executor.py                       # 828 行：双线程池 + 隔离 event loop
-    │       │   ├── registry.py / config.py / token_collector.py
-    │       │   └── builtins/{general_purpose, bash_agent}
-    │       ├── tools/
-    │       │   ├── tools.py                  # get_available_tools 装配
-    │       │   ├── skill_manage_tool.py / sync.py / types.py
-    │       │   └── builtins/{task_tool, view_image_tool, present_file_tool,
-    │       │                 clarification_tool, setup_agent_tool, update_agent_tool,
-    │       │                 invoke_acp_agent_tool, tool_search}
-    │       ├── mcp/{client.py, cache.py, oauth.py, tools.py}
-    │       ├── skills/{installer, parser, security_scanner, tool_policy, validation,
-    │       │           types, storage/{local_skill_storage, skill_storage}}
-    │       ├── models/{factory, claude_provider, vllm_provider, openai_codex_provider,
-    │       │           mindie_provider, patched_{openai,deepseek,minimax}, credential_loader}
-    │       ├── guardrails/{builtin.py, provider.py, middleware.py}
-    │       ├── runtime/
-    │       │   ├── runs/{manager, worker, schemas, store/{base,memory}}    # RunManager + run_agent
-    │       │   ├── stream_bridge/{base, memory, async_provider}            # SSE 桥
-    │       │   ├── checkpointer/{provider, async_provider}                 # 持久化
-    │       │   ├── events/store/{base, db, jsonl, memory}                  # 事件落库
-    │       │   ├── store/{provider, async_provider, _sqlite_utils}         # LangGraph Store
-    │       │   ├── journal.py / serialization.py / user_context.py / converters.py
-    │       ├── persistence/
-    │       │   ├── engine.py / base.py / json_compat.py
-    │       │   ├── feedback/{model, sql} · run/{model, sql} · thread_meta/{base, sql, memory, model}
-    │       │   ├── user/{model} · models/{run_event}
-    │       │   └── migrations/{env.py, versions/}
-    │       ├── config/<26 份 *_config.py>   # AppConfig 主体 + 子配置（auth/sandbox/memory/...）
-    │       ├── reflection/resolvers.py      # resolve_variable / resolve_class
-    │       ├── tracing/factory.py           # LangFuse 集成
-    │       ├── uploads/manager.py
-    │       └── utils/{file_conversion, network, readability, time}
-    ├── app/
-    │   ├── gateway/
-    │   │   ├── app.py            # FastAPI 入口 + lifespan 钩子
-    │   │   ├── auth_middleware.py / csrf_middleware.py / internal_auth.py / langgraph_auth.py
-    │   │   ├── auth/<13 个文件>   # JWT、本地 Provider、Sqlite 仓库、密码、reset_admin
-    │   │   ├── deps.py            # langgraph_runtime 上下文
-    │   │   ├── authz.py / services.py / config.py
-    │   │   └── routers/<15 个 router>   # threads, thread_runs, runs, feedback,
-    │   │                                  uploads, artifacts, agents, suggestions,
-    │   │                                  channels, auth, mcp, memory, models, skills,
-    │   │                                  assistants_compat
-    │   └── channels/                # IM 集成
-    │       ├── message_bus.py / manager.py / service.py / base.py / store.py / commands.py
-    │       └── feishu / slack / telegram / dingtalk / wechat / wecom / discord
-    └── tests/  (178 个 test_*.py)   # 包含 test_harness_boundary.py 强制 app 单向依赖
-```
-
-> ⚠️ 注意：根目录的 `config.yaml`、`extensions_config.json` 已经存在并被你本地修改过，启动逻辑会优先从 **项目根目录**（不是 backend/）读取。这点见 `packages/harness/deerflow/config/app_config.py:112` 的 `resolve_config_path`。
+**v2 已落地**：
+- ✅ LangGraph/LangChain 深度章节拆为两份独立 md（02 LangChain Agent + Middleware；03 LangGraph 深入），不再"速通带过"。
+- ✅ 三方向兼顾（生产化/可观测/IM + 多 agent 编排/Context Engineering），不砍任何章节，面试视角小节按"业务型 + 创业型"双视角给问题。
+- ✅ 显式补齐两个原计划深度不够的章节：**Run 生命周期 + StreamBridge 抽象**（09）、**Persistence Alembic 五表设计**（24）；并把"反思纠错"和"可观测性"的细节按清单落到 13 / 14 / 23 三份 md 里。
 
 ---
 
-## 2. 我的切分原则
+## 1. 项目一句话定位
 
-1. **依赖优先**：先讲"被依赖"的（配置、状态、Reflection），再讲"依赖别人"的（agent、middleware、subagent）。
-2. **从外到内**：先有"我能跑起来"的感性认识（启动链路 + 一次请求的全景），再钻进每个中间件的内部状态机。
-3. **以中间件链为骨架**：deer-flow 的核心架构就是 **`build_lead_runtime_middlewares` + `_build_middlewares`** 这条 14–18 节中间件链——它是 Harness 工程六要素的物理对应物。
-4. **把"易混淆点"单独成章**：例如 ThreadState vs RunContext vs LangGraph configurable、Local vs Aio Sandbox、Run vs Thread Run vs Stateless Run 这些点很容易踩坑，单独抽出来讲。
-5. **每份文档都能独立读懂**：但模块依赖图见 §4，按编号顺序最高效。
+> **DeerFlow 2.0 是一个基于 LangGraph + LangChain 的「Super Agent Harness（超级智能体宿主）」**：它不是又一个 Agent 框架，而是把"沙箱、记忆、技能、子智能体、可观测性、IM 接入"等 Agent 运行所需的基础设施**预装成一套可扩展的运行时**，让一个 LLM 真正像「拥有一台电脑的同事」一样工作。
+
+它解决的核心痛点：
+1. **Agent 不只是"调工具"，而是要在一个有状态的环境里工作** —— 因此有沙箱 + 虚拟文件系统。
+2. **复杂任务必须能并行分解** —— 因此有 Subagent 双线程池 + 并发上限护栏。
+3. **长任务必须能跨会话记住用户** —— 因此有异步去重的长期记忆。
+4. **Agent 容易跑飞、循环、撞 Token 上限** —— 因此有 LoopDetection / Summarization / SubagentLimit / DanglingToolCall 等 18 个中间件协同保护。
+5. **企业级落地要可观测、可审计、可分发** —— 因此有 RunJournal、Guardrails、Tracing、Gateway/Channels 多入口、Alembic 五表持久化。
 
 ---
 
-## 3. 中间件链矩阵（一张图先入脑）
+## 2. 整体物理拓扑（一张图把项目装进脑子里）
 
 ```mermaid
-flowchart LR
-    A0["ThreadDataMiddleware<br/>(lazy_init=True)"] --> A1[UploadsMiddleware]
-    A1 --> A2["SandboxMiddleware<br/>(lazy_init=True)"]
-    A2 --> A3[DanglingToolCallMiddleware]
-    A3 --> A4[LLMErrorHandlingMiddleware]
-    A4 --> A5{"guardrails.enabled?"}
-    A5 -- yes --> A6[GuardrailMiddleware]
-    A5 -- no --> A7
-    A6 --> A7[SandboxAuditMiddleware]
-    A7 --> A8[ToolErrorHandlingMiddleware]
-    A8 --> A9[DynamicContextMiddleware]
-    A9 --> A10{"summarization.enabled?"}
-    A10 -- yes --> A11[DeerFlowSummarizationMiddleware]
-    A10 -- no --> A12
-    A11 --> A12{"plan_mode?"}
-    A12 -- yes --> A13[TodoMiddleware]
-    A12 -- no --> A14
-    A13 --> A14{"token_usage.enabled?"}
-    A14 -- yes --> A15[TokenUsageMiddleware]
-    A14 -- no --> A16
-    A15 --> A16[TitleMiddleware]
-    A16 --> A17[MemoryMiddleware]
-    A17 --> A18{"model.supports_vision?"}
-    A18 -- yes --> A19[ViewImageMiddleware]
-    A18 -- no --> A20
-    A19 --> A20{"tool_search.enabled?"}
-    A20 -- yes --> A21[DeferredToolFilterMiddleware]
-    A20 -- no --> A22
-    A21 --> A22{"subagent_enabled?"}
-    A22 -- yes --> A23[SubagentLimitMiddleware]
-    A22 -- no --> A24
-    A23 --> A24{"loop_detection.enabled?"}
-    A24 -- yes --> A25[LoopDetectionMiddleware]
-    A24 -- no --> A26
-    A25 --> A26["ClarificationMiddleware<br/>**ALWAYS LAST**"]
-```
+flowchart TB
+    subgraph CLIENT["客户端入口"]
+        FE["Frontend Next.js :3000"]
+        IM["IM Channels<br/>Feishu/Slack/Telegram/DingTalk/WeChat/WeCom"]
+        EMB["DeerFlowClient<br/>(嵌入式 Python)"]
+        CC["Claude Code Skill<br/>(claude-to-deerflow)"]
+    end
 
-源码佐证：
-- `packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py:129`（`build_lead_runtime_middlewares`）—— 负责 ① ~ ⑦
-- `packages/harness/deerflow/agents/lead_agent/agent.py:240`（`_build_middlewares`）—— 负责 ⑧ ~ ⑱
-- Clarification 必须最后：见 `factory.py:286` 注释 `# Clarification (always last among built-ins)`
+    NGX["Nginx :2026<br/>统一反代"]
+
+    subgraph GATEWAY["Gateway :8001 (FastAPI)"]
+        REST["REST Routers<br/>models/mcp/skills/memory/threads/runs/feedback/..."]
+        LGSRV["LangGraph 兼容运行时<br/>RunManager + run_agent worker + StreamBridge"]
+        AUTH["Auth/CSRF/CORS<br/>internal_auth + langgraph_auth"]
+    end
+
+    subgraph PERSIST["Persistence (Alembic)"]
+        T_TM[("threads_meta")]
+        T_R[("runs")]
+        T_RE[("run_events")]
+        T_FB[("feedback")]
+        T_U[("users")]
+        CKPT[("Checkpointer<br/>SQLite/Postgres")]
+        STORE[("Store<br/>cross-thread KV")]
+    end
+
+    subgraph CORE["deerflow Harness Core"]
+        LEAD["Lead Agent<br/>create_agent + 18 middlewares"]
+        SUB["Subagent Executor<br/>双线程池 3+3"]
+        SBX["Sandbox<br/>Local / AioSandbox"]
+        MEM["Memory<br/>异步队列 + LLM 抽取"]
+        MCP["MCP MultiClient<br/>stdio/SSE/HTTP + OAuth"]
+        SKILL["Skills<br/>渐进式加载"]
+        MODEL["Model Factory<br/>反射 + Thinking + Vision"]
+    end
+
+    PROV["Provisioner :8002<br/>(可选,Aio/K8s 模式)"]
+
+    FE --> NGX
+    IM -.langgraph-sdk.-> NGX
+    EMB -. 直接进程内 .-> CORE
+    CC -. HTTP .-> NGX
+
+    NGX -->|/api/langgraph/*<br/>rewrite| LGSRV
+    NGX -->|/api/*| REST
+    NGX -->|/| FE
+
+    LGSRV --> LEAD
+    LGSRV --> T_R
+    LGSRV --> T_RE
+    REST --> T_TM
+    REST --> T_FB
+    REST --> T_U
+    LEAD --> CKPT
+    LEAD --> STORE
+    LEAD -->|spawn| SUB
+    LEAD -->|tool call| SBX
+    LEAD -->|tool call| MCP
+    LEAD --> SKILL
+    LEAD --> MODEL
+    LEAD --> MEM
+    SBX -. provisioner mode .-> PROV
+```
 
 ---
 
-## 4. 22 份学习文档的切分方案
+## 3. 学习目标地图（读完整套文档你能回答的高级问题）
 
-> 每份文档独立 ~3000–6000 字，含至少 1 张 Mermaid 图、≥3 个源码引用、1 段最小可运行示例 / 3 个 debug 任务。预计总学习耗时 **40–55 小时**（含动手实验）。
+| 维度 | 你将能回答 |
+|---|---|
+| LangGraph 内功 | StateGraph 的 reducer 解决什么并发问题？Checkpointer + Store 各自的边界？`Command(goto=END)` 与 `interrupt` 的区别？|
+| LangChain Agent | `create_agent` 相比 `create_react_agent` 多了什么？AgentMiddleware 五个钩子 `before_agent` / `before_model` / `modify_model_request` / `after_model` / `after_agent` 各在哪一步执行？|
+| 系统设计 | 为什么 DeerFlow 选择"Middleware 链 + create_agent"而不是手写 StateGraph？|
+| 状态管理 | ThreadState 的 `merge_artifacts` / `merge_viewed_images` reducer 设计动机？|
+| 运行时 | RunManager 状态机 pending→running→completed/cancelled 如何防并发？pre-run checkpoint 怎么做"回滚到取消前"？|
+| 流式协议 | LangGraph `stream_mode=["values","messages-tuple","custom"]` 的语义差异？为什么 messages-tuple 是 delta 而 values 不能重复合成？|
+| 并发 | 双线程池 + `MAX_CONCURRENT_SUBAGENTS=3` 如何防止 fan-out 爆炸？|
+| 安全 | 为什么 LocalSandbox 默认禁用 host bash？虚拟路径如何防逃逸？|
+| 上下文 | DanglingToolCall + LoopDetection + Summarization 如何协同避免"history 损坏"和 token 爆炸？|
+| 工具 | MCP cache 为什么用 mtime invalidation？OAuth token 流为什么放在 client 层？|
+| 模型 | 反射 `use: module:Class` 路径相比硬编码工厂模式的取舍？vLLM 自定义 Provider 解决了什么？|
+| 持久化 | 五表（threads_meta / runs / run_events / feedback / users）为什么这么切？Checkpointer 与业务表为什么不能合并？Alembic 怎么管理迁移？|
+| 可观测 | RunJournal vs LangSmith vs Langfuse 的分工？`tags=["middleware:summarize"]` 解决了什么 trace 可读性问题？|
+| 工程化 | harness/app 双层依赖防线是怎么用 CI 测试守住的？|
 
-### Part A · 全局观与启动链路（3 篇 · 约 6h）
+---
 
-| # | 文档标题 | 一句话简介 |
-|---|----------|-----------|
-| 01 | **项目定位与启动链路** | 弄懂 `make dev` 背后到底起了几个进程（Gateway / Frontend / Nginx），langgraph.json 的三个挂载点（graphs/auth/checkpointer）如何串起来。 |
-| 02 | **Harness ↔ App 双层架构与导入边界** | 为什么 `packages/harness/` 是可发布包、`app/` 不是？`test_harness_boundary.py` 如何在 CI 里物理拦截 `from app.*` 反向引用？ |
-| 03 | **配置体系：AppConfig + ExtensionsConfig + 反射装配** | 26 份子配置如何组合成 AppConfig；`$ENV_VAR` 解析、配置缓存 mtime 失效、`resolve_variable` 反射加载工具/沙箱/Provider 的全套机制。 |
+## 4. 完整文档目录（29 份，按学习顺序编号）
 
-### Part B · LangGraph 状态与图核心（3 篇 · 约 6h）
+> 编号格式 `NN-name.md`；推荐按顺序阅读，跨章节有依赖关系，见第 5 节依赖图。
 
-| # | 文档标题 | 一句话简介 |
-|---|----------|-----------|
-| 04 | **ThreadState 状态模型与 Reducer** | `merge_artifacts` 去重、`merge_viewed_images` 清空语义、AgentState 继承体系；Configurable / Context / State 的边界。 |
-| 05 | **Agent 工厂双轨：make_lead_agent vs create_deerflow_agent** | 一条是 config 驱动的应用入口、一条是纯参数 SDK 入口；它们如何共享中间件装配并避免循环导入。 |
-| 06 | **中间件链总览（14–18 节）与构建顺序契约** | 为什么 ClarificationMiddleware 必须最后？`@Next/@Prev` 注解如何允许第三方插入中间件？冲突检测算法实现。 |
+### A. 项目认知层（5 份） —— 你在地图上的位置 + 内功打底
 
-### Part C · 沙箱与文件系统（3 篇 · 约 7h）
+- **`01-positioning-and-mental-model.md` —— 项目定位与心智模型**
+  从"Deep Research 框架 → Super Agent Harness"的转向；Agent Harness 六要素与 DeerFlow 的对应；与 LangGraph 官方 prebuilt、CrewAI、AutoGen 的横向对比。
 
-| # | 文档标题 | 一句话简介 |
-|---|----------|-----------|
-| 07 | **沙箱抽象与生命周期：Sandbox/Provider/Middleware 三件套** | 抽象基类 → LocalSandboxProvider 单例 → Docker(AioSandbox) → K8s Provisioner 的差异；lazy_init 为什么默认 True。 |
-| 08 | **虚拟路径系统与多挂载点** | `/mnt/user-data/{workspace,uploads,outputs}`、`/mnt/skills`、`/mnt/acp-workspace` 如何映射到物理路径；`replace_virtual_path` 的 4 类替换策略 + 路径回填到日志的反向脱敏。 |
-| 09 | **沙箱工具集：bash/read/write/str_replace/ls/glob/grep** | 1583 行 `sandbox/tools.py` 的安全护栏（路径校验、命令分词、`..` 拒绝、相同 path 的细粒度锁、stdout/stderr 回收）。 |
+- **`02-langchain-agent-and-middleware-protocol.md` —— LangChain：`create_agent` + AgentMiddleware 协议深讲**（**深度版 · C 方案**）
+  - **源码逐行解读** `langchain.agents:create_agent` 内部如何展开成 StateGraph（`model_request` 节点 / `tools` 节点 / 条件边路由）
+  - AgentMiddleware 五个钩子（`before_agent` / `before_model` / `modify_model_request` / `after_model` / `after_agent`）的"洋葱模型"执行栈与具体调用时机
+  - **对比 `create_react_agent`（prebuilt）**：前者无中间件、固定 ReAct 循环；后者可插拔，能在 `after_model` 用 `Command(goto=END)` 提前终止 —— DeerFlow 的 `ClarificationMiddleware` 就是范例
+  - **DeerFlow 真实中间件 walkthrough**：以 `SubagentLimitMiddleware` / `ClarificationMiddleware` / `ViewImageMiddleware` 三个最具代表性的中间件为例，演示 `after_model` / `before_model` / `modify_model_request` 三种钩子的真实落地写法
+  - BaseTool / `@tool` 装饰器与 Pydantic schema 推断；async vs sync tool 的执行路径差异
+  - 为后续 18 个中间件章节铺底。
 
-### Part D · 工具系统与 MCP（2 篇 · 约 5h）
+- **`03-langgraph-deep-dive.md` —— LangGraph 深入：StateGraph / Reducer / Checkpointer / Store / Streaming**（**深度版**，原速通章节的后半）
+  - `StateGraph` 与 `MessagesState` 的关系；自定义 `Annotated[T, reducer]` 的语义与并发写入安全性
+  - `Checkpointer`（per-thread 状态快照）vs `Store`（cross-thread KV，DeerFlow 用于 user-scoped memory）的分工
+  - `Command(goto=END/node, update={...})` 路由 + 状态更新原子化
+  - `interrupt(value)` 与人工介入；`Send(node, state)` 与 map-reduce / fan-out
+  - `stream_mode` 全模式（`values` / `updates` / `messages` / `messages-tuple` / `custom` / `debug`）语义对照表
+  - 一个最小 30 行的 StateGraph demo 演示 reducer 并发合并行为 —— 让你跳过"只跑过 demo"阶段
 
-| # | 文档标题 | 一句话简介 |
-|---|----------|-----------|
-| 10 | **工具装配：get_available_tools + 反射 + 去重** | 用户配置工具 → 内置工具 → MCP 工具 → ACP 工具的合并顺序；issue #1803 的命名冲突如何被拦截；同步/异步包装。 |
-| 11 | **MCP 集成与 Tool Search（延迟工具）** | `MultiServerMCPClient`、mtime 缓存失效、OAuth client_credentials/refresh_token、ToolSearch 让 LLM "按需发现"工具的 DeferredToolRegistry。 |
+- **`04-directory-anatomy-and-harness-app-split.md` —— 工程目录解剖：harness/app 双层架构**
+  为什么把 `deerflow` 拆成可发布的 harness 包 + 私有 app 层？`tests/test_harness_boundary.py` 如何用 AST/import 扫描守护"harness 永不导入 app"的依赖防线；DeerFlowClient 与 Gateway 同源 schema 哲学。
 
-### Part E · Skills 与 Prompt（2 篇 · 约 4h）
+- **`05-config-system.md` —— 配置体系：AppConfig + ExtensionsConfig + 反射装配** ⭐ **新增**
+  - `config.yaml` 26 份子配置如何组合成 **`AppConfig`** 总聚合根（models / tools / tool_groups / sandbox / skills / memory / summarization / token_usage / loop_detection / title / subagents / tool_search / guardrails / channels / ...）
+  - **`$ENV_VAR` 解析机制**：什么时机替换、嵌套 dict 如何递归、解析失败的回退策略
+  - **配置缓存 + mtime 失效**：`get_app_config()` 为什么不是简单 `@lru_cache`，而是要比对路径变化 + 文件 mtime —— 让 Gateway 和 LangGraph 在 `config.yaml` 编辑后**无需重启**就能拿到新配置
+  - **配置版本管理**：`config_version` 字段 + `make config-upgrade` 如何自动合并新增字段
+  - **反射装配三件套**：`reflection/resolve_variable(path)` 与 `resolve_class(path, base_class)` 如何把 `use: deerflow.community.aio_sandbox:AioSandboxProvider` 这种字符串解析成可调用对象；缺包时的 actionable 错误提示
+  - **ExtensionsConfig**（`extensions_config.json`）：MCP servers + skills 的 enabled 状态如何与 `AppConfig` 解耦管理；Gateway API 修改后如何触发 LangGraph 端的失效
+  - 配置优先级（CLI arg → env var → cwd → project root）的设计动机
+  - 这是后面所有"可插拔"章节（沙箱/工具/MCP/模型/Provider/Guardrail/Channel）的前置心智模型
 
-| # | 文档标题 | 一句话简介 |
-|---|----------|-----------|
-| 12 | **Skills 系统：从 SKILL.md 到 system prompt** | 22 个内置 skill 的发现/解析/安全扫描/启用持久化；`allowed-tools` 如何反向裁剪工具集。 |
-| 13 | **823 行系统 Prompt 的拼装艺术** | `apply_prompt_template` 的 9 个动态片段（soul/skills/deferred/subagent/acp/mounts/self-update/reminders/thinking）；为何把易变内容塞进 first HumanMessage 而非 system prompt。 |
+### B. 整体架构层（4 份） —— 系统是怎么跑起来的
 
-### Part F · 记忆系统（2 篇 · 约 4h）
+- **`06-runtime-and-process-topology.md` —— 进程拓扑与启动链**
+  Nginx → Gateway → LangGraph 兼容运行时 → `make_lead_agent` 的完整调用链；`langgraph.json` 的 `graphs/auth/checkpointer` 三键解读；本地/Docker/Prod 四种启动模式如何映射到同一份代码；`make_checkpointer` 工厂的作用。
 
-| # | 文档标题 | 一句话简介 |
-|---|----------|-----------|
-| 14 | **MemoryMiddleware + 异步 Queue + Updater** | 用户/AI 消息过滤、按 thread_id 去重的 debounced timer、LLM 抽取事实 / topOfMind 三字段、原子写文件、whitespace 归一化的事实去重。 |
-| 15 | **DynamicContextMiddleware 与 Prefix Cache 友好的注入策略** | 为什么 memory + 当前日期不放 system prompt，而是塞进 first HumanMessage 的 `<system-reminder>`？Prefix cache 命中率的工程权衡。 |
+- **`07-thread-state-and-state-reducers.md` —— ThreadState 与状态合并语义**
+  `ThreadState(AgentState)` 扩展字段：`sandbox`/`artifacts`/`todos`/`uploaded_files`/`viewed_images`；自定义 reducer `merge_artifacts`（按 path 去重）与 `merge_viewed_images`（合并/清空哨兵）的设计动机与潜在并发 bug；为什么必须在 ThreadState 而不是在中间件里做合并。
 
-### Part G · 子智能体与并发（2 篇 · 约 5h）
+- **`08-streaming-protocol-and-stream-modes.md` —— 流式协议与 stream_mode 语义不变量**
+  LangGraph `stream_mode=["values","messages-tuple","custom"]` 三种事件的产生时机与字段差异；DeerFlow 为什么**不**把 messages-tuple 重新合成回 values（防重复投递的核心不变量）；DeerFlowClient `stream()` 与 Gateway SSE 的"per-id dedup"机制；`docs/STREAMING.md` 设计还原。
 
-| # | 文档标题 | 一句话简介 |
-|---|----------|-----------|
-| 16 | **Subagent 编排：task 工具 + Executor + 双线程池** | `MAX_CONCURRENT_SUBAGENTS=3`、隔离的 asyncio 事件循环、`SubagentLimitMiddleware` 如何在 after_model 截断超额 tool_calls。 |
-| 17 | **Subagent 注册表 + token 回收 + tool_call_id 缓存** | 内置 `general-purpose / bash` 子智能体、定制 subagent 如何 wire 进来；`SubagentTokenCollector` 把子图 token 用量回灌到父 AIMessage。 |
+- **`09-run-lifecycle-and-stream-bridge.md` —— Run 生命周期 + StreamBridge 抽象** ⭐ **新增**
+  - `RunManager` 状态机：`pending → running → completed / failed / cancelled / timeout`，并发取消的 race-condition 防护
+  - `run_agent` worker 协程：从 RunManager 拉任务 → 调用 `make_lead_agent` → 桥接事件流到 StreamBridge
+  - **pre-run checkpoint 快照与回滚**：cancel 后如何让 thread state 不残留半截 AI message
+  - **SSE 事件桥 + heartbeat**：客户端断线重连时如何用 `runs/{rid}/join` 续接；为什么要心跳
+  - **为什么 `StreamBridge` 是抽象的**：`memory.py`（单进程） vs `async_provider.py`（跨 worker 协调）；面向未来 Redis / NATS 实现的口子
+  - `runtime/runs/schemas.py` 的 Pydantic 模型 = REST 路由 `/api/threads/{tid}/runs/*` 与 `/api/runs/*` 的契约
 
-### Part H · 反思纠错与可观测性（2 篇 · 约 4h）
+### C. 核心模块层（10 份） —— 一个模块一份
 
-| # | 文档标题 | 一句话简介 |
-|---|----------|-----------|
-| 18 | **错误处理三件套 + LoopDetection + Summarization** | DanglingToolCallMiddleware（补占位 ToolMessage）、LLMErrorHandlingMiddleware、ToolErrorHandlingMiddleware；循环检测的 hash+滑窗算法；上下文压缩的 trigger 与 keep 策略。 |
-| 19 | **Tracing & Observability：RunJournal + Token Usage + LangFuse** | `event_store` 落库、callbacks 注入、`record_token_usage` 的 message-position 合并、`tags=["middleware:summarize"]` 在 trace 中的可读化。 |
+- **`10-lead-agent-factory.md` —— Lead Agent 工厂与 Prompt 装配**
+  `make_lead_agent` → `_make_lead_agent` 全流程；`apply_prompt_template` 如何把 skills/memory/subagent 拼进系统提示；bootstrap 模式 vs 普通模式 vs 自定义 agent 三分支；`_resolve_model_name` 三级回退；`filter_tools_by_skill_allowed_tools` 工具策略闸门。
 
-### Part I · 运行时与持久化（2 篇 · 约 4h）
+- **`11-middleware-chain-overview.md` —— 18 个中间件全景与执行顺序**
+  `build_lead_runtime_middlewares` + `_build_middlewares` 的两阶段装配；为什么 ClarificationMiddleware 必须最后；中间件执行顺序如何影响异常恢复路径；一张时序图把"洋葱"展开。
 
-| # | 文档标题 | 一句话简介 |
-|---|----------|-----------|
-| 20 | **RunManager + run_agent worker + StreamBridge** | Run 生命周期（pending→running→completed/cancelled）、pre-run checkpoint 快照与回滚、SSE 事件桥 + heartbeat；为什么 StreamBridge 是抽象的。 |
-| 21 | **Persistence：Alembic 迁移、threads_meta / runs / run_events / feedback / users 五表设计** | per-user 隔离、JSON 列兼容层、SQLite/Postgres 双后端、Checkpointer/Store 与业务表的分工。 |
+- **`12-middleware-deep-1-context-injection.md` —— 上下文注入三件套**
+  `ThreadDataMiddleware`（per-thread 目录 + `get_effective_user_id()` 解析）、`UploadsMiddleware`（文件注入）、`SandboxMiddleware`（沙箱生命周期 acquire/release）—— 它们如何把"运行时上下文"喂给 LLM。
 
-### Part J · 接入层与 SDK（1 篇 · 约 3h）
+- **`13-middleware-deep-2-error-recovery.md` —— 错误处理三件套 + LoopDetection** ⭐ **强化**
+  - `DanglingToolCallMiddleware`：为什么需要补占位 ToolMessage（OpenAI 严格校验 `tool_call_id` 序列）；如何同时清理 `additional_kwargs["tool_calls"]` 防 provider 端二次报错
+  - `LLMErrorHandlingMiddleware`：Provider 错误归一化为 assistant-facing 可恢复消息
+  - `ToolErrorHandlingMiddleware`：工具异常 → 错误 ToolMessage，保证 run 不中断
+  - `LoopDetectionMiddleware`：**hash + 滑动窗口算法**（`from_config` 解读阈值），命中后 hard-stop 同时清 `tool_calls` 与 `additional_kwargs.tool_calls`
+  - 四道防线协同时序图
 
-| # | 文档标题 | 一句话简介 |
-|---|----------|-----------|
-| 22 | **Gateway API + IM Channels + DeerFlowClient 三种接入方式** | 15 个 FastAPI Router 的职责切分、AuthMiddleware/CSRFMiddleware 双闸门、IM Channels 通过 langgraph-sdk 同协议接入、`DeerFlowClient` 嵌入式 SDK 与 Gateway 的 1:1 对齐。 |
+- **`14-middleware-deep-3-context-engineering.md` —— 上下文工程层** ⭐ **强化**
+  - `SummarizationMiddleware`：`trigger`（tokens / messages / fraction）与 `keep`（recent N）策略；为什么用 `with_config(tags=["middleware:summarize"])` 标记内部 LLM 调用；`preserve_recent_skill_*` 保留最近技能内容；`memory_flush_hook` 在压缩前强制 flush 记忆
+  - `DynamicContextMiddleware`：日期 / 记忆注入到 first HumanMessage 而**不**入 system prompt 的关键动机 —— **保住 prefix-cache 命中率**
+  - `ViewImageMiddleware`：vision 模型才注入 base64；`merge_viewed_images` reducer 的清空哨兵
+  - `TitleMiddleware`：首轮自动标题；structured 内容归一化
+
+- **`15-sandbox-system.md` —— 沙箱系统与虚拟路径**
+  `Sandbox` 抽象 + `SandboxProvider.acquire/get/release`；`LocalSandboxProvider` 单例 vs `AioSandboxProvider` 容器化；虚拟路径 `/mnt/user-data/{workspace,uploads,outputs}` 双向翻译；为什么本地默认禁用 host bash；`file_operation_lock.py` 的 `(sandbox_id, path)` 锁粒度；search.py / security.py 的越权防护。
+
+- **`16-tools-system.md` —— 工具系统：四源合并 + 内建/Community + Schema 协议** ⭐ **拆分独立**
+  - **`get_available_tools` 四源合并**：config-defined tools / MCP tools / 内建 builtins / subagent task —— 顺序与去重策略
+  - **`tools/builtins/`**：`present_files` / `ask_clarification`（→ Clarification 中断）/ `view_image`（按模型 vision 能力条件加载）/ `setup_agent`（bootstrap）/ `update_agent`（custom-agent self-update）
+  - **`@tool` 装饰器与 BaseTool**：Pydantic schema 自动推断、async/sync 路径、`ToolMessage` 返回值规范
+  - **Community 工具栈**：`tavily` / `jina_ai` / `firecrawl` / `infoquest` / `exa` / `serper` / `ddg_search` / `image_search` / `aio_sandbox` —— 不同搜索/抓取后端如何用同一抽象接入
+  - **ACP agent 工具**：`invoke_acp_agent` 接外部 ACP-compatible agent；per-thread workspace 路径协议
+  - **`tools/sync.py`** 工具同步与 `tools/types.py` 的统一类型
+
+- **`17-mcp-integration.md` —— MCP 集成：多服务器 + OAuth + 懒加载缓存** ⭐ **拆分独立**
+  - **MultiServerMCPClient（langchain-mcp-adapters）**：DeerFlow 在它之上做了什么薄封装
+  - **三种 transport**：stdio（command-based）/ SSE / HTTP 的连接生命周期与可靠性差异
+  - **OAuth token 流**：`client_credentials` + `refresh_token` 的两段式获取；Authorization header 自动注入；token 过期/刷新失败的降级策略
+  - **懒加载 + mtime cache invalidation**：`mcp/cache.py` 为什么不用 TTL 而用文件 mtime；首次工具调用才连接 server 的代价权衡
+  - **运行时热更新**：Gateway `PUT /api/mcp/config` 写回 `extensions_config.json` → LangGraph 端通过 mtime 自然失效
+  - **`DeferredToolFilterMiddleware` 与 Tool Search 协作**：动态隐藏未启用 MCP 工具的 schema，控制 prompt 体积
+  - 与第 16 章的边界：本章只讲 MCP；第 16 章只讲非 MCP 的工具源
+
+- **`18-skills-system.md` —— 技能系统：渐进式能力加载**
+  SKILL.md 前置元信息（name/description/license/allowed-tools）；`skills/{public,custom}` 双源扫描；`.skill` ZIP 安装 + `security_scanner.py`；`filter_tools_by_skill_allowed_tools` 工具策略闸门；"按需加载"如何控制 prompt 体积。
+
+- **`19-subagent-system.md` —— 子智能体：双线程池调度与并发护栏**
+  `SubagentExecutor` 调度池(3) + 执行池(3) 拆分动机；`task()` 工具 → 5s 轮询 → SSE 事件流；`SubagentLimitMiddleware` 在 `after_model` 截断多余 tool_calls 的硬限；15 分钟超时 + `token_collector` 把 sub 的 token 计费回归到主调点。
+
+### D. 关键技术点层（5 份） —— 横切能力
+
+- **`20-long-term-memory.md` —— 长期记忆：异步抽取 + 去重 + 多用户隔离**
+  `MemoryMiddleware` 过滤 → `MemoryQueue` 30s 防抖 → 后台线程 LLM 抽取 → 原子写文件；为什么必须在 enqueue 时捕获 `user_id`（contextvar 在 timer 线程不可用）；事实去重的"空白归一化"细节；每用户/每 agent 隔离 + legacy migration 脚本；`summarization_hook.py` 的 `memory_flush_hook` 与 Summarization 中间件的协同。
+
+- **`21-model-factory-and-providers.md` —— 模型工厂：反射、Thinking、Vision、CLI Provider**
+  `create_chat_model` 的反射加载；`when_thinking_enabled` 与 `extra_body.chat_template_kwargs.enable_thinking`（Qwen / vLLM 0.19）；自定义 `VllmChatModel` 保留非标 `reasoning` 字段；Codex/Claude OAuth CLI Provider 的凭证加载策略；`patched_*` 系列对官方 LangChain provider 的最小侵入式修复。
+
+- **`22-guardrails-and-security.md` —— 安全护栏体系**
+  `GuardrailMiddleware` 工具调用前置鉴权（AllowlistProvider / OAP / 自定义 Protocol）；`SandboxAuditMiddleware` 命令审计；artifact 强制下载防 XSS；本地沙箱的非隔离边界声明；`guardrails.enabled` 配置开关；护栏与 LoopDetection 的责任划分。
+
+- **`23-tracing-and-observability.md` —— RunJournal + Token Usage + LangSmith + Langfuse** ⭐ **强化**
+  - **RunJournal**（`runtime/journal.py`）：运行内事件流落库到 `run_events` 表；`event_store` 与 SSE 的双写关系
+  - **Token Usage**（`TokenUsageMiddleware`）：`record_token_usage` 的 **message-position 合并**（不依赖 message id，避免 retry 错位）；subagent 用 `tool_call_id` 缓存后合并回主 AIMessage
+  - **LangSmith / Langfuse**（`tracing/factory.py`）：双 callback 注入；`with_config(tags=["middleware:summarize"])` 让 trace 中能区分"summarize 子调用"与 lead_agent 主调用 —— 可观测性最容易被忽略的一个细节
+  - 三层观测的分工：RunJournal（内部业务）/ LangSmith（云端 trace）/ Langfuse（自托管 trace）
+
+- **`24-persistence-alembic-and-five-tables.md` —— Persistence：Alembic 迁移 + 五表设计** ⭐ **新增**
+  - **五表设计**：`threads_meta`（标题/用户/创建时间）+ `runs`（运行元数据）+ `run_events`（事件流，append-only）+ `feedback`（用户反馈）+ `users`（认证）
+  - 为什么**不**把这些塞进 LangGraph Checkpointer：Checkpointer 是 per-thread state 黑盒，业务表需要跨 thread 查询/分页/反馈关联
+  - `engine.py` + `base.py`：SQLite/Postgres 双后端；`json_compat.py` 抹平 JSON 列在不同数据库的语法差异
+  - **per-user 隔离**：所有业务表的查询必须经过 `user_id` 过滤
+  - `migrations/`（Alembic）：版本演进与 `make migrate` 流程；`env.py` 如何接到 DeerFlow `engine`
+  - Checkpointer/Store vs 业务表的分工三视图：State / Event / Index
+
+### E. 工程实践层（3 份） —— 生产化
+
+- **`25-gateway-api-design.md` —— Gateway 路由设计与 LangGraph 兼容层**
+  REST 路由族（models/mcp/skills/memory/threads/runs/feedback/...）；`/api/langgraph/*` rewrite 兼容前端 langgraph-sdk；分页 `after_seq/before_seq` cursor；artifact 下载安全策略；CORS+CSRF 同源/分源切换；`internal_auth.py` 进程内服务间认证。
+
+- **`26-channels-and-im-integration.md` —— IM 通道适配模式**
+  `MessageBus`（pub/sub）+ `ChannelManager`（dispatcher）+ `Channel`（platform impl）三层；Feishu 卡片在位 patch vs Slack/Telegram `runs.wait`；DingTalk AI Card 流式打字机；`channel:chat[:topic]` 三级 thread 映射键；Channel 进程内通过 langgraph-sdk 调 Gateway 的 internal_auth 注入。
+
+- **`27-embedded-client-and-conformance-tests.md` —— DeerFlowClient 与 Gateway 一致性测试**
+  Embedded 与 HTTP 同源的设计哲学；`TestGatewayConformance` 如何用 Pydantic 校验 schema 一致性；为什么这是一种比 OpenAPI 更轻量的契约保证。
+
+### F. 面试串讲层（2 份） —— 最后冲刺
+
+- **`28-design-tradeoffs-top10.md` —— 设计权衡 Top 10**
+  从全套源码中提炼的 10 个最值得讨论的工程取舍。预览：
+  1. 为什么 sandbox lock 用 `(sandbox_id, path)` 而不是全局
+  2. 为什么 messages-tuple 是 delta 而 values 不是
+  3. 为什么 ThreadDataMiddleware 必须在 SandboxMiddleware 之前
+  4. 为什么 Memory 用异步队列而不是同步写
+  5. 为什么 Subagent 拆调度池/执行池两个 pool
+  6. 为什么业务五表不放进 Checkpointer
+  7. 为什么 StreamBridge 必须抽象
+  8. 为什么 LocalSandbox 默认禁 host bash
+  9. 为什么用反射 `use: module:Class` 而不是工厂注册
+  10. 为什么 DynamicContext 注入到 first HumanMessage 而不是 system prompt
+
+- **`29-interview-grand-summary.md` —— 高级 Agent 工程师面试串讲**
+  按"Agent Harness 六要素"组织：反馈循环 / 记忆持久化 / 动态上下文 / 安全护栏 / 工具集成 / 可观测性 —— 每要素 2 个高频面试题 + 教科书答案 + DeerFlow 源码佐证。同时提供"业务型大厂面试卷"+"创业型 AI 公司面试卷"两套配比。
 
 ---
 
 ## 5. 文档依赖关系图
 
 ```mermaid
-graph TD
-    D01[01 启动链路] --> D02[02 Harness/App 边界]
-    D02 --> D03[03 配置体系]
-    D03 --> D04[04 ThreadState]
-    D04 --> D05[05 Agent 工厂]
-    D05 --> D06[06 中间件链总览]
-    D06 --> D07[07 沙箱抽象]
-    D07 --> D08[08 虚拟路径]
-    D08 --> D09[09 沙箱工具集]
-    D06 --> D10[10 工具装配]
-    D10 --> D11[11 MCP & Tool Search]
-    D06 --> D12[12 Skills]
-    D12 --> D13[13 System Prompt]
-    D06 --> D14[14 Memory]
-    D14 --> D15[15 DynamicContext]
-    D06 --> D16[16 Subagent 编排]
-    D16 --> D17[17 Subagent 进阶]
-    D06 --> D18[18 错误/Loop/Summarization]
-    D18 --> D19[19 Tracing]
-    D03 --> D20[20 Runtime/Run/Stream]
-    D20 --> D21[21 Persistence]
-    D20 --> D22[22 Gateway/Channels/Client]
+graph LR
+    A1[01 定位] --> A2[02 LangChain]
+    A2 --> A3[03 LangGraph 深入]
+    A3 --> A4[04 目录解剖]
+    A4 --> A5[05 配置体系]
+
+    A5 --> B6[06 进程拓扑]
+    B6 --> B7[07 ThreadState]
+    B7 --> B8[08 Stream 协议]
+    B8 --> B9[09 Run 生命周期]
+
+    B7 --> C10[10 Lead Agent 工厂]
+    A2 --> C10
+    A5 --> C10
+    C10 --> C11[11 中间件全景]
+
+    C11 --> C12[12 上下文注入]
+    C11 --> C13[13 错误恢复]
+    C11 --> C14[14 上下文工程]
+
+    C12 --> C15[15 Sandbox]
+    C10 --> C16[16 Tools]
+    C16 --> C17[17 MCP]
+    A5 --> C17
+    C16 --> C18[18 Skills]
+    C10 --> C19[19 Subagent]
+
+    C14 --> D20[20 Memory]
+    A5 --> D21[21 Model Factory]
+    C16 --> D21
+    C15 --> D22[22 Guardrails]
+    C13 --> D22
+    B9 --> D23[23 Tracing]
+    D21 --> D23
+    B9 --> D24[24 Persistence]
+
+    B6 --> E25[25 Gateway API]
+    E25 --> E26[26 IM Channels]
+    E25 --> E27[27 Embedded Client]
+
+    C19 --> F28[28 Top 10 权衡]
+    D20 --> F28
+    D22 --> F28
+    D23 --> F28
+    D24 --> F28
+    F28 --> F29[29 面试串讲]
 ```
 
-> 推荐顺序：先纵向打通 **01→06**（脑子里建图），然后横向按兴趣展开 D/E/F/G/H（任选一条），最后回到 **20→22** 看接入层。
+**关键依赖路径**（如果你时间有限只能挑读）：
+- **最短面试速通路径（12 份）**：01 → 02 → 03 → 05 → 06 → 09 → 10 → 11 → 15 → 19 → 20 → 29
+- **完整深度路径（29 份）**：按编号顺序
 
 ---
 
-## 6. 学习节奏（建议）
+## 6. 学习节奏与互动规则
 
-| 阶段 | 文档 | 时长 | 目标 |
-|------|------|------|------|
-| 第 1 周 | 01–06 | 12h | 跑通 `make dev`，能在断点处看到一次完整对话的中间件链流向。 |
-| 第 2 周 | 07–13 | 14h | 改造一个 skill，自定义一个工具，让它进入主 prompt 并能被调用。 |
-| 第 3 周 | 14–19 | 14h | 给一个 thread 强制注入"幻觉事实"，观察 MemoryUpdater 怎么拒绝；故意制造 tool 循环，看 LoopDetection 怎么救场。 |
-| 第 4 周 | 20–22 | 10h | 用 `DeerFlowClient` 替换 HTTP 写一个本地脚本；写一个最小自定义 IM Channel。 |
-
----
-
-## 7. 质量约束（贯穿全 22 篇）
-
-1. ❌ 每份文档都不允许出现"大概 / 应该 / 可能是"这类描述源码行为的模糊词。
-2. ✅ 每个论断要么挂源码路径行号、要么挂可执行验证步骤。
-3. ✅ 中间件 / 工具 / 配置项名称必须与仓库里的实际命名一致（已在本总览中校对过）。
-4. ✅ Mermaid 图统一用 `flowchart` / `sequenceDiagram` / `stateDiagram-v2`，禁外链图。
+1. 我每次只输出**一份 md**，输出后停下来问你 2-3 个**理解性问题**。
+2. 你回答（或者直接说"下一份"）之后，我才进入下一份。
+3. 每份 md 严格遵守你给定的 9 节结构（学习目标 / 源码定位 / Mermaid 图 / 核心讲解 / 通用模式 / 六要素映射 / 常见坑 / 动手实操 / 面试视角 / 延伸阅读）。
+4. 所有代码引用形如 `packages/harness/deerflow/agents/lead_agent/agent.py::_make_lead_agent`，可点击直跳。
+5. 面试视角小节按"业务型大厂卷 + 创业型 AI 公司卷"双视角各出 1 题，覆盖你提到的三个方向。
+6. 如果你发现某个模块在路线里漏了或顺序需要调整，**现在是调整的最佳时机**。
 
 ---
 
-## 8. 接下来的交付节奏
+## 7. v3 最终确认 —— 直接回复"OK"即可进入 01
 
-- **下一轮**：交付 `01-startup-and-runtime.md`（启动链路与 LangGraph Studio 三处挂载点）。
-- 我每交付一份会主动停下来等你反馈：是要继续、调整切分，还是先深挖某一篇。
-- 如果你在某份文档读到不通的地方，可以直接告诉我"第 X 章的 Y 不懂"，我会在下一轮的开头先回这个问题再继续推进。
-
----
-
-**请确认：**
-
-1. 这 22 份的切分方案 OK 吗？是否想合并 / 拆分某几篇？（例如 16+17 是否合并？或者把 22 拆成 Gateway / Channels / Client 三份？）
-2. 学习节奏（4 周）和耗时（40–55h）是否符合你的实际可用时间？
-3. 是否希望我在每篇文档结尾加入一个"快速记忆卡"小节（5 条可背诵的精华点）？
-
-确认完，我就开始写 **01-startup-and-runtime.md**。
+29 份目录已锁定，节奏不精简，02 走 C 方案（源码逐行 + prebuilt 对比 + DeerFlow 中间件 walkthrough），新增 05 配置体系、16/17 工具与 MCP 拆分。如果还有任何调整请现在指出；否则我开始产出 **`01-positioning-and-mental-model.md`**。

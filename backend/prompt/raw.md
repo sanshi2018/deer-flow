@@ -121,3 +121,23 @@ Write-Test-Fix 循环：只有当系统验证通过时，Harness 才会确认任
 各个md应当拆分合适，md的数量不要太多也不要太少，应该按照逻辑，模块编写
 
 综上请给出提示词，以便于AI能高效理解并完成我的需求
+
+此外，请检查下述内容是否存在，如不存在请补充相关内容
+
+### 反思纠错与可观测性
+
+| # | 文档标题 | 一句话简介 |
+|---|----------|-----------|
+| | **错误处理三件套 + LoopDetection + Summarization** | DanglingToolCallMiddleware（补占位 ToolMessage）、LLMErrorHandlingMiddleware、ToolErrorHandlingMiddleware；循环检测的 hash+滑窗算法；上下文压缩的 trigger 与 keep 策略。 |
+| | **Tracing & Observability：RunJournal + Token Usage + LangFuse** | `event_store` 落库、callbacks 注入、`record_token_usage` 的 message-position 合并、`tags=["middleware:summarize"]` 在 trace 中的可读化。 |
+
+### 运行时与持久化
+
+| # | 文档标题 | 一句话简介 |
+|---|----------|-----------|
+| | **RunManager + run_agent worker + StreamBridge** | Run 生命周期（pending→running→completed/cancelled）、pre-run checkpoint 快照与回滚、SSE 事件桥 + heartbeat；为什么 StreamBridge 是抽象的。 |
+| | **Persistence：Alembic 迁移、threads_meta / runs / run_events / feedback / users 五表设计** | per-user 隔离、JSON 列兼容层、SQLite/Postgres 双后端、Checkpointer/Store 与业务表的分工。 |
+
+新增一个配置体系的讲解模块
+| | **配置体系：AppConfig + ExtensionsConfig + 反射装配** | 26 份子配置如何组合成 AppConfig；`$ENV_VAR` 解析、配置缓存 mtime 失效、`resolve_variable` 反射加载工具/沙箱/Provider 的全套机制。 |
+工具与MCP拆分成两篇
